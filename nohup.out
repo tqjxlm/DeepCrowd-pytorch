@@ -1,0 +1,48 @@
+Process started. Please wait...
+Process finished
+All processes set to deterministic
+Log writes out to checkpoints/rmsprop1.log
+Process started. Please wait...
+Process finished
+Process started. Please wait...
+Process finished
+All processes set to deterministic
+Log writes out to checkpoints/rmsprop.log
+Process started. Please wait...
+Process finished
+All processes set to deterministic
+Log writes out to checkpoints/rmsprop1.log
+Process started. Please wait...
+Process finished
+Process started. Please wait...
+Process finished
+Process started. Please wait...
+Process finished
+All processes set to deterministic
+Log writes out to checkpoints/rmsprop1.log
+Process started. Please wait...
+Process finished
+Process started. Please wait...
+Process finished
+All processes set to deterministic
+Log writes out to checkpoints/adam1.log
+Process started. Please wait...
+Process finished
+All processes set to deterministic
+Log writes out to checkpoints/adam1.log
+Process started. Please wait...
+Process finished
+/mnt/disk/lqt/miniconda3/envs/pytorch/lib/python3.6/multiprocessing/semaphore_tracker.py:143: UserWarning: semaphore_tracker: There appear to be 3 leaked semaphores to clean up at shutdown
+  len(cache))
+All processes set to deterministic
+Log writes out to checkpoints/adam1.log
+Process started. Please wait...
+Process finished
+All processes set to deterministic
+Log writes out to checkpoints/relu6.log
+Process started. Please wait...
+Process finished
+All processes set to deterministic
+Log writes out to checkpoints/lrelu.log
+Process started. Please wait...
+Process finished
