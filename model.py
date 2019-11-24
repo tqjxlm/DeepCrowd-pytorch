@@ -29,7 +29,7 @@ class ConvBlock(nn.Module):
         self.activation = activation
 
     def forward(self, x):
-        x=  self.pad(x)
+        x = self.pad(x)
         x = self.conv(x)
         # x = self.bn(x)
         return self.activation(x)
@@ -64,21 +64,22 @@ class Model(nn.Module):
         )
 
         # local branch
-        # conv_blocks = []
-        # size = np.array((cfg.local_map_size, cfg.local_map_size))
-        # for s in cfg.local_conv_setting:
-        #     block = ConvBlock(s[0], s[1], s[2], s[3],
-        #                       activation=cfg.activation)
-        #     conv_blocks.append(block)
-        #     size = block.size_out(size)
-        # self.local_conv = nn.Sequential(*conv_blocks)
+        conv_blocks = []
+        size = np.array((cfg.local_map_size, cfg.local_map_size))
+        for s in cfg.local_conv_setting:
+            block = ConvBlock(s[0], s[1], s[2], s[3],
+                              activation=cfg.activation)
+            conv_blocks.append(block)
+            size = block.size_out(size)
+        self.local_conv = nn.Sequential(*conv_blocks)
 
-        # size_out = size[0] * size[1] * \
-        #     cfg.local_conv_setting[-1][1]
+        size_out = size[0] * size[1] * \
+            cfg.local_conv_setting[-1][1]
 
         self.local_hidden = nn.Sequential(
             Flatten(),
-            nn.Linear(cfg.local_map_size * cfg.local_map_size * cfg.local_input_channel, cfg.hidden_size // 2),
+            # nn.Linear(cfg.local_map_size * cfg.local_map_size * cfg.local_input_channel, cfg.hidden_size // 2),
+            nn.Linear(size_out, cfg.hidden_size // 2),
         )
 
         # rnn step
@@ -116,7 +117,7 @@ class Model(nn.Module):
             next_h: next hidden state. shape (rnn_layer_size, N, rnn_hidden_size) or a tuple of two
         """
         x_global = self.global_hidden(self.global_conv(s[0]))
-        x_local = self.local_hidden(s[1])
+        x_local = self.local_hidden(self.local_conv(s[1]))
         x = torch.cat((x_global, x_local), 1)
         x = self.cfg.activation(x)
 
@@ -126,7 +127,7 @@ class Model(nn.Module):
         hidden_a = self.cfg.activation(self.hidden_a(x))
         hidden_c = self.cfg.activation(self.hidden_c(x))
 
-        mu = self.cfg.max_a * torch.tanh(self.mu(hidden_a))
+        mu = self.mu(hidden_a)
         sigma = torch.sigmoid(self.sigma(hidden_a)) + 1e-5
 
         val = self.val(hidden_c)

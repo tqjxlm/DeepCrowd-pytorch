@@ -40,27 +40,19 @@ class CrowdMap(FeatureMap):
             centers:    Numpy array of shape (N, 2)
             done:       Indicates whether agents are still valid. Numpy array of shape (N, )
         """
-        valid = np.nonzero(~done)[0]
-        for agent_id in range(self.num_agents):
-            excluded = centers[np.nonzero(valid != agent_id)[0]]
-            self.map[agent_id+1] = self._make_gaussian(torch.from_numpy(excluded).float(), radius=32).sum(dim=0)
-        
-        self.global_map[0] = self._make_gaussian(torch.from_numpy(centers[valid]).float(), radius=3).sum(dim=0)
 
+        heat_maps = self._make_gaussian(torch.from_numpy(centers).float(), radius=32)
+        heat_map_sum = heat_maps[~done].sum(dim=0)
+
+        for agent_id in range(self.num_agents):
+            if not done[agent_id]:
+                self.map[agent_id+1] = heat_map_sum - heat_maps[agent_id]
+        
     def get_feature(self):
         """
-        Return a crowd map for each agent
+        Return a crowd map for each agent (heat map without self)
 
         Return:
             crowd_maps:     tensor of shape (N, 1, H, W)
         """
         return self.map[1:].unsqueeze(1)
-
-    def get_global_feature(self):
-        """
-        Return a global crowd map with all agents
-
-        Return:
-            global_map:     tensor of shape (1, 1, H, W)
-        """
-        return self.global_map.unsqueeze(1)

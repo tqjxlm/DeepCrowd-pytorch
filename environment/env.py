@@ -2,20 +2,22 @@ import random
 import numpy as np
 from collections import namedtuple
 import itertools
+from math import ceil
 
 import torch
 import torch.nn.functional as F
 
 from config import Config
-from utils import to_pixel, same_pixel, clip_length, Profiler, Agents, out_of_bound
+from utils import to_pixel, same_pixel, clip_length, Profiler, Agents, out_of_bound, generate_vector
 from .feature_map import FeatureMap
 from .obstacle import ObstacleMap, PolygonObstacle, CircleObstacle
 from .crowd import CrowdMap
 from .attention import AttentionMap
-from .level import get_level, Level
+from .stage import get_stage, Stage
 
 
 class Environment:
+
     def __init__(self, cfg: Config, device):
         self.cfg = cfg
         self.num_agents = cfg.total_agents
@@ -29,11 +31,15 @@ class Environment:
 
         self.img = torch.zeros([3, h, w], device=device)
 
-        self.level = get_level(self, cfg.level)
+        self.stage = get_stage(self, cfg.stage)
 
         self.reset_reward()
 
     def share_memory(self):
+        """
+        Make all data support multi-process
+        """
+
         self.crowd_map.share_memory()
         self.obs_map.share_memory()
 
@@ -41,70 +47,37 @@ class Environment:
         """
         Render the current stage with all feature maps
         """
-        with torch.no_grad():
-            self.img.zero_()
-            self.obs_map.render(self.img)
-            self.attention_map.render(self.img, self.collided)
+        with Profiler('render'):
+            with torch.no_grad():
+                self.img.zero_()
+                self.obs_map.render(self.img)
+                self.attention_map.render(self.img, self.collided, self.done)
 
-            # (C, H, W) to (W, H, C) and flip Y axis for showing as an image
-            return np.flip(self.img.cpu().numpy().transpose(2, 1, 0), axis=1)
-
-    def generate_state(self, done):
-        """
-        Generate states for one specific or all agents
-
-        Return:
-            full_map:       Batch of full feature maps. Torch tensor of shape (N, C, H, W)
-            local_map:      Batch of local feature maps. Torch tensor of shape (N, C_l, H_l, W_l)
-        """
-        with Profiler('generate state'):
-            crowd_tensor = torch.cat(
-                (self.crowd_map.get_feature(), self.obs_map.get_feature()), dim=1)  # (N, 3, H, W)
-
-            self.attention_map.update(torch.tensor(self.agents.p))
-            attention_tensor = self.attention_map.get_feature().unsqueeze(1)  # (N, 1, H, W)
-
-            full_map = torch.cat((attention_tensor, crowd_tensor), dim=1)
-
-            # crop a local view feature for every agent
-            size = self.cfg.local_map_size
-            local_map = torch.zeros(
-                [self.num_agents, self.cfg.local_input_channel, size, size], device=self.device)
-            pad = size // 2
-            full_map_padded = F.pad(
-                full_map, (pad, pad, pad, pad), mode='replicate')
-            crowd_map_padded = F.pad(self.crowd_map.get_global_feature(
-            ), (pad, pad, pad, pad), mode='replicate').squeeze()
-            for i in range(self.num_agents):
-                center = to_pixel(self.agents.p[i])
-                try:
-                    local_map[i, 0] = crowd_map_padded[center[0]
-                        :center[0]+size, center[1]:center[1]+size]
-                    local_map[i, 1:] = full_map_padded[i][2:, center[0]
-                        :center[0]+size, center[1]:center[1]+size]
-                except:
-                    print(center)
-                    print(self.agents.p[i])
-                    raise NotImplementedError
-
-        return full_map, local_map
+                # (C, H, W) to (W, H, C) and flip Y axis for showing as an image
+                return np.flip(self.img.cpu().numpy().transpose(2, 1, 0), axis=1)
 
     def reset_reward(self):
         """
         Reset the reward
         """
-        self.level.reset_level()
+        self.stage.reset_stage()
 
     def reset(self):
         """
         Generate a number of agents randomly
 
         It must be called after the stage is set, otherwise agents may collide with obstacles
+
+        Return:
+            states:     initial states of all agents, size ((N, C, H, W), (N, C_l, H_l, W_l))
+            done:       initial terminal flags, size (N, )
+            hidden:     initial memory hidden feature, size (RNN_LAYER_SIZE, N, RNN_HIDDEN_SIZE)
         """
-        self.agents = self.level.reset_agents()
+        self.agents = self.stage.reset_agents()
 
         # Initial states
         done = np.zeros((self.num_agents,), dtype=bool)
+        self.success = np.zeros((self.num_agents,), dtype=bool)
         if self.cfg.rnn_type == 'LSTM':
             hidden = (
                 torch.zeros(
@@ -115,16 +88,16 @@ class Environment:
         else:
             hidden = torch.zeros(
                 [self.cfg.rnn_layer_size, self.num_agents, self.cfg.rnn_hidden_size], device=self.device)
-        return self.generate_state(done), done, hidden
+        return self._generate_state(done), done, hidden
 
-    def step(self, acceleration, pre_done):
+    def step(self, acceleration, pre_done, is_last_step):
         """
         Render a frame and move all agents.
 
         Should be called outside of any agent's action loop
 
         Params:
-            acceleration:   numpy array of shape (N, 2)
+            acceleration:   numpy array of shape (N, 2), meaning direction and magnitude
             pre_done:       numpy array of shape (N, )
 
         Return:
@@ -134,22 +107,28 @@ class Environment:
             success:    success count
             collide:    inter-agent collide count
         """
-        with Profiler('step'):
+
+        with Profiler('env step'):
             # Update velocity
+            # acc_dir, acc_len = acceleration[:, 0], acceleration[:, 1]
+            # self.agents.a = generate_vector(acc_dir * np.pi, acc_len[:, None] * self.cfg.max_a)
             self.agents.a = clip_length(acceleration, self.cfg.max_a)
             self.agents.v += self.agents.a
             self.agents.v = clip_length(self.agents.v, self.cfg.max_v)
 
             # Collision detection
-            old_p = to_pixel(self.agents.p)
             dest = self.agents.p + self.agents.v
-            dest, reward, done, success, collide = self.check_collision(
+            dest, reward, done, success, collide = self._move_agents(
                 self.agents.p, dest, pre_done)
 
-            # Effort penalty
-            reward -= self.cfg.effort_ratio * \
-                (np.linalg.norm(self.agents.a, axis=1) + 1) * ~done
+            self.agents.v[self.collided] = np.array([0, 0])
 
+            # Timeout penalty
+            if is_last_step:
+                reward[~done] = self.cfg.fail_penalty
+
+            # Effort penalty
+            reward -= self.cfg.effort_ratio * np.linalg.norm(self.agents.v, axis=1) * ~pre_done
             reward *= self.cfg.reward_scale
 
             # Update position
@@ -157,15 +136,20 @@ class Environment:
             new_p = to_pixel(self.agents.p[~pre_done])
 
         # Update crowd map
-        with Profiler('update crowd map'):
-            self.crowd_map.map[0, old_p[:, 0], old_p[:, 1]] = 0
+        with Profiler('crowd map'):
+            self.crowd_map.map[0].zero_()
             self.crowd_map.map[0, new_p[:, 0], new_p[:, 1]] = 1
-            self.crowd_map.update(self.agents.p, done)
+            self.crowd_map.update(self.agents.p, pre_done)
 
-        return self.generate_state(done), torch.tensor(reward, dtype=torch.float32, device=self.device), done, success, collide
+        reward = torch.tensor(reward, dtype=torch.float32, device=self.device)
 
-    def check_collision(self, pos, end, pre_done):
+        return self._generate_state(done), reward, done, success, collide
+
+    def _move_agents(self, pos, end, pre_done):
         """
+        Use a scan line method to move all the agents given their intended destination
+        If there's any collision along the path, they will be stopped before the collision
+
         Input:
             pos:        starting point of agents. Numpy array of shape (N, 2)
             end:        intended end point of agents. Numpy array of shape (N, 2)
@@ -176,23 +160,26 @@ class Environment:
             reward:     reward after collision test. Numpy array of shape (N, )
             done:       if state is done after collision test. Numpy array of shape (N, )
             success:    success count
-            agent_collide:      inter-agent collide count
+            collide:    collide count
         """
-        done = pre_done.copy()
-        # stopped = done.copy()
-        start = pos.copy()
-        collided = np.zeros((self.num_agents,), dtype=bool)
 
+        done = pre_done.copy()
+        start = pos.copy()
+
+        collided = np.zeros((self.num_agents,), dtype=bool)
         reward = np.zeros((self.num_agents,))
-        success = 0
+        success = np.zeros((self.num_agents,), dtype=bool)
 
         start_idx = to_pixel(start)
         end_idx = to_pixel(end)
         pxl_distance = end_idx - start_idx
 
-        num_step = max(np.max(np.abs(pxl_distance[~done])), 1)
+        num_step = ceil(self.cfg.max_v_per_second)
         stride = (end - start) / num_step
         stride[done] = np.array([0, 0])
+
+        obs_map = self.obs_map.cpu()[0]
+        reward_map = self.obs_map.cpu()[1:]
 
         # March agents
         for _ in range(num_step):
@@ -200,50 +187,106 @@ class Environment:
             pxls = to_pixel(start)
 
             # Scan for collision
-            # TODO: extremely slow this way. better vectorize it
+            # TODO: Maybe we can vectorize it
             for i in range(self.num_agents):
                 if done[i] or collided[i]:
                     continue
+
+                crash = False
                 pxl = pxls[i]
-                push_back = False
 
-                # Stage collision
+                # Stage bound
                 if out_of_bound(pxl, self.size):
+                    crash = True
+                    # collided[i] = True
+                    # reward[i] = self.collide_penalty
+                # Reward (the only terminal condition)
+                elif reward_map[i, pxl[0], pxl[1]] > 0:
                     done[i] = True
-                    reward[i] = -10
-                    push_back = True
-
-                # Obstacle collision
-                elif self.obs_map.map[0, pxl[0], pxl[1]] > 0:
-                    done[i] = True
-                    reward[i] = -self.obs_map.map[0, pxl[0], pxl[1]]
-                    push_back = True
-
-                # Reward collision
-                elif self.obs_map.map[i+1, pxl[0], pxl[1]] > 0:
-                    done[i] = True
-                    success += 1
-                    reward[i] = self.obs_map.map[i+1, pxl[0], pxl[1]]
-
+                    success[i] = True
+                    reward[i] = self.cfg.finish_reward
+                # Obstacle
+                elif obs_map[pxl[0], pxl[1]] > 0:
+                    crash = True
+                    # collided[i] = True
+                    # reward[i] = -obs_map[pxl[0], pxl[1]]
                 # Inter-agent collision
                 else:
-                    for j in range(self.num_agents):
-                        # For any other running agents, check collision
-                        # Episodes are not terminated after collision, so agents should be pushed back and stopped
-                        if not done[j] and not collided[j] and j != i and same_pixel(pxl, pxls[j]):
-                            collided[i] = True
-                            push_back = True
-                            reward[i] = -10
-                            break
-                
-                if push_back:
-                    start[i] -= stride[i] / np.abs(stride[i]).max()
-                    start[i] = np.clip(start[i], [0, 0], [self.size[1]-1, self.size[0]-1])
+                    # Check against all unfinished agents
+                    tmp = done[i]
+                    done[i] = True
+                    diff = pxls[np.logical_and(~done, ~collided)] - pxl
+                    done[i] = tmp
 
-            # Stop collided agents
-            # stopped[done] = True
+                    for j in range(diff.shape[0]):
+                        if diff[j][0] == 0 and diff[j][1] == 0:
+                            collided[i] = True
+                            break
+
+                # If there is collision, push the agent back for one cell
+                if collided[i] or crash:
+                    if crash and self.cfg.terminate_on_crash:
+                        done[i] = True
+                        reward[i] = self.cfg.fail_penalty
+                    else:
+                        start[i] -= stride[i] / np.abs(stride[i]).max()
+                        pxls[i] = to_pixel(start[i])
+                        reward[i] = self.cfg.collide_penalty
+
+            # Stop terminated or collided agents
             stride[done] = np.array([0, 0])
             stride[collided] = np.array([0, 0])
 
         self.collided = collided
-        return start, reward, done, success, collided.sum()
+        self.done = done
+        self.success = np.logical_or(self.success, success)
+        start = np.clip(start, [0, 0], [self.size[1]-1, self.size[0]-1])
+        return start, reward, done, success.sum(), collided.sum()
+
+    def _generate_state(self, done):
+        """
+        Generate states for one specific or all agents
+
+        Return:
+            full_map:       Batch of full feature maps. Torch tensor of shape (N, C, H, W)
+            local_map:      Batch of local feature maps. Torch tensor of shape (N, C_local, H_local, W_local)
+        """
+        with Profiler('generate state'):
+            # Feature tensor tells about the environment
+            feature_tensor = torch.cat(
+                (self.crowd_map.get_feature(), self.obs_map.get_feature()), dim=1)  # (N, 3, H, W)
+
+            # Attention tensor indicates self position
+            self.attention_map.update(torch.tensor(self.agents.p))
+            attention_tensor = self.attention_map.get_feature().unsqueeze(1)  # (N, 1, H, W)
+
+            full_map = torch.cat((attention_tensor, feature_tensor), dim=1)
+
+            # Crop a local view feature for every agent
+            local_map = self._crop_local_map(done, self.cfg.local_map_size, self.cfg.local_input_channel, feature_tensor)
+
+        return full_map, local_map
+
+    def _crop_local_map(self, done, size, local_input_channel, feature_tensor):
+        """
+        Crop a smaller part of the map centered on every agent position
+        """
+
+        local_map = torch.zeros(
+            [self.num_agents, local_input_channel, size, size], device=self.device)
+
+        # Pad all maps to fix out-of-bound conditions
+        # TODO: There should be a faster way to do this
+        pad = size // 2
+        padding = (pad, pad, pad, pad)
+        full_map_padded = F.pad(feature_tensor, padding, mode='replicate')
+
+        # Crop a rect centered on agent positions
+        for i in range(self.num_agents):
+            if done[i]:
+                continue
+
+            center = to_pixel(self.agents.p[i])
+            local_map[i] = full_map_padded[i][2:, center[0]:center[0]+size, center[1]:center[1]+size]
+
+        return local_map

@@ -16,15 +16,15 @@ class Memory():
     """
 
     def __init__(self, cfg: Config, device):
-        self.train_unit = cfg.train_agents
+        self.train_unit = cfg.trainable_agents
         self.capacity = cfg.maximum_step
         self.device = device
         self.lstm = cfg.rnn_type == 'LSTM'
-        self.prioritized = cfg.prioritized_memory
+        # self.prioritized = cfg.prioritized_memory
         self.gamma = cfg.gamma
 
         capacity = cfg.maximum_step
-        train_unit = cfg.train_agents
+        train_unit = cfg.trainable_agents
         self.full_feature = torch.zeros(
             [capacity, train_unit, cfg.global_input_channel, *cfg.stage_size], device=device)
         self.local_feature = torch.zeros(
@@ -80,7 +80,7 @@ class Memory():
 
     def finish_rollout(self, next_v: torch.Tensor):
         """
-        Dump the current rollouts from buffer into memory
+        Calculate the advantage value used in optimization
 
         Params:
             next_v:     the next state value for all agents, tensor fo shape (N, )
@@ -94,7 +94,7 @@ class Memory():
             self.returns[pos] = R.detach()
             self.advs[pos] = (R - self.values[pos]) * self.masks[pos].float()
 
-    def sample(self, batch_size):
+    def sample(self, batch_size, success_rate, success):
         """
         Sample batches of history steps that cover all the memory
 
@@ -109,28 +109,46 @@ class Memory():
         """
         valid_agent = []
         valid_step = []
+
+        # Balance positive and negative experience
+        if success_rate == 0 or success_rate == 100:
+            negative_scale = 1
+            positive_scale = 1
+        elif success_rate < 50:
+            negative_scale = 1
+            positive_scale = (int)(50 / success_rate) + 1
+        else:
+            # negative_scale = (int)(50 / (100-success_rate)) + 1
+            negative_scale = 1
+            positive_scale = 1
+
         for i in range(self.train_unit):
+            if success[i]:
+                duplicate = positive_scale
+            else:
+                duplicate = negative_scale
             for j in range(self.capacity):
                 if self.masks[j, i] == 1:
-                    valid_agent.append(i)
-                    valid_step.append(j)
+                    for _ in range(duplicate):
+                        valid_agent.append(i)
+                        valid_step.append(j)
 
-        shuffled_idx = np.array([valid_step, valid_agent]).T
+        valid_idx = np.array([valid_step, valid_agent]).T
         # if self.prioritized:
-        #     priority = torch.exp(self.returns[:self.size] - torch.min(self.returns[:self.size], dim=0).values)
+        #     priority = torch.log(self.returns[:self.size] - torch.min(self.returns[:self.size], dim=0).values)
         #     priority = (priority / priority.sum()).cpu().numpy()
         # else:
-        np.random.shuffle(shuffled_idx)
+        np.random.shuffle(valid_idx)
 
-        total_batch = len(shuffled_idx)
+        total_batch = len(valid_idx)
         for i in range(0, total_batch, batch_size):
             # if self.prioritized:
-            #     idx = np.random.choice(shuffled, batch_size, p=priority)
+            #     idx = np.random.choice(valid_idx, batch_size, p=priority)
             # else:
             if i + batch_size > total_batch:
-                idx = shuffled_idx[i:]
+                idx = valid_idx[i:]
             else:
-                idx = shuffled_idx[i: i + batch_size]
+                idx = valid_idx[i: i + batch_size]
 
             full_feature = self.full_feature[idx[:, 0], idx[:, 1]]
             local_feature = self.local_feature[idx[:, 0], idx[:, 1]]
@@ -141,8 +159,11 @@ class Memory():
             advantages = self.advs[idx[:, 0], idx[:, 1]]
             hidden = self.hidden[idx[:, 0], idx[:, 1]].transpose(1, 0).contiguous()
 
+            cnn_features = (full_feature, local_feature)
             if self.lstm:
                 cell = self.cell[idx[:, 0], idx[:, 1]].transpose(1, 0).contiguous()
-                yield (full_feature, local_feature), actions, (hidden, cell), probs, values, returns, advantages
+                rnn_features = (hidden, cell)
             else:
-                yield (full_feature, local_feature), actions, hidden, probs, values, returns, advantages
+                rnn_features = hidden
+
+            yield cnn_features, actions, rnn_features, probs, values, returns, advantages

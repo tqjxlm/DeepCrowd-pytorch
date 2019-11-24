@@ -1,0 +1,8 @@
+{
+    "stage": 4,
+    "total_agents": 64,
+    "maximum_step": 500,
+    "terminate_on_crash": false,
+    "effort_ratio": 0,
+    "reset_stage_every": 3
+}

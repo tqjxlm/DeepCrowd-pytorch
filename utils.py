@@ -32,8 +32,12 @@ def clip_length(vector, maximum, axis=1):
     return vector
 
 
+def generate_vector(direction, length):
+    return np.column_stack((np.sin(direction), np.cos(direction))) * length
+
+
 def out_of_bound(p, size):
-    return p[0] < 0 or p[0] >= size[0] or p[1] < [0] or p[1] >= size[1]
+    return p[0] < 0 or p[0] >= size[0] or p[1] < 0 or p[1] >= size[1]
 
 
 def timestamp_ms():
@@ -43,9 +47,9 @@ def timestamp_ms():
 def get_quad(y, x, h, w):
     return np.array([
         [y, x],
-        [y + h, x],
-        [y + h, x + w],
-        [y, x + w]
+        [y + h - 1, x],
+        [y + h - 1, x + w - 1],
+        [y, x + w - 1]
     ])
 
 
@@ -84,6 +88,16 @@ def init_weights(m):
                 init.orthogonal_(param)
             else:
                 init.normal_(param)
+
+
+def format_millisecond(ms):
+    seconds=(ms/1000)%60
+    seconds = int(seconds)
+    minutes=(ms/(1000*60))%60
+    minutes = int(minutes)
+    hours=(ms/(1000*60*60))%24
+
+    return hours, minutes, seconds
 
 
 class Agents(object):
@@ -143,6 +157,11 @@ class Profiler():
         Profiler.record_end(self.name)
 
     @staticmethod
+    def reset():
+        Profiler.run_time = {}
+        Profiler.last_time = {}
+
+    @staticmethod
     def enable_profiling(profiling):
         Profiler.profiling = profiling
 
@@ -164,19 +183,26 @@ class Profiler():
     @staticmethod
     def print_all(total_step, total_episode):
         if Profiler.profiling:
-            total_time = 0
-            for key in Profiler.run_time:
-                total_time += Profiler.run_time[key]
+            step_time = Profiler.run_time['step']
+            total_time = Profiler.run_time['episode']
+
             print('--------------- Profiler Statistics ---------------')
+            coverage = 0
             for key, value in Profiler.run_time.items():
-                print('%s: total %d, %f%%' %
-                      (key, value, value / total_time * 100))
-            print('time per step: %d' % (total_time / total_step))
-            print('time per episode: %d' % (total_time / total_episode))
+                if key not in ['step', 'episode']:
+                    percentage = value / total_time * 100
+                    coverage += percentage
+                    print('%s: total %d, %.3f%%' % (key, value, percentage))
+            print('time per step: %d ms' % (step_time / total_step))
+            print('time per episode: %d ms' % (total_time / total_episode))
+            print('profiler coverage: %.3f%%' % coverage)
+            print('total time %02d:%02d:%02d' % format_millisecond(total_time))
             print('----------------------- end -----------------------')
 
+            return step_time / total_step, total_time / total_episode
 
-class Logger(object):
+
+class StdoutAdaptor(object):
     """
     A logger that output to both terminal and file
 

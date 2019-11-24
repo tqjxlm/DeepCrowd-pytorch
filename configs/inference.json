@@ -1,0 +1,23 @@
+{
+    "mode": "inference",
+    "gpu_id": 0,
+    "episode": 10,
+    "load": "raw_3",
+    "best": false,
+    "deterministic": false,
+    "sample_action": true,
+    "render": true,
+    "output": true,
+    "model": {
+        "local_map_size": 31,
+        "dropout": 0,
+        "hidden_size": 256,
+        "rnn_hidden_size": 256,
+        "rnn_layer_size": 1
+    },
+    "challenge": {
+        "reset_stage_every": 1,
+        "terminate_on_crash": false,
+        "total_agents": 128
+    }
+}

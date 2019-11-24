@@ -1,23 +1,47 @@
-# DeepCrowd-pytorch
+# DeepCrowd
 
-Pytorch implementation of the DeepCrowd method.
+Experiment implementation of DeepCrowd.
 
 ## Usage
 
-Common examples:
+### New train
 
-* a default train on all gpu:       python main.py --level 0
-* a default train on gpu#1:         python main.py --level 0 --gpu-id 1
-* train for 10000 episodes:         python main.py --level 0 --episode 10000
-* resume an existing train:         python main.py --level 0 --load checkpoint_name
-* resume the last best record:      python main.py --level 0 --load checkpoint_name --best
-* save to a custom name:            python main.py --level 0 --save checkpoint_name
-* load and train next stage:        python main.py --level 1 -l cp_name --best -s another_cp_name
-* test and render a checkpoint:     python main.py --level 1 --inference --render --load checkpoint_name --best
+Modify configs/new-train.json, then run
 
-For more config please refer to config.py
+``` bash
+python main.py new-train [task number]
+```
 
-## Requirements:
+### Load and resume a previous train
 
-* pytorch 1.0+
+Modify configs/resume.json, then run
+
+``` bash
+python main.py resume [task number]
+```
+
+### Inference and render
+
+Modify configs/resume.json, then run
+
+``` bash
+python main.py inference [task number]
+```
+
+### Change hyper-paramters
+
+Most key hyper-paramters are specified in configs/*.json
+
+Other parameters are specified in config.py
+
+### Change task parameter
+
+Task parameters are specified in challenges/*.json
+
+Other stage parameters are specified in env/stage.py
+
+## Dependencies
+
+* pytorch 1.0
 * pyqtgraph
+* tensorboard

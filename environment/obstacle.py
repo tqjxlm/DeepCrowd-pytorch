@@ -101,7 +101,7 @@ class ObstacleMap(FeatureMap):
         parameters:
             img:    Tensor with shape (3, h, w)
         """
-        idx = torch.nonzero(self.map[1])
+        idx = torch.nonzero(self.map[1:].sum(dim=0))
         img[:, idx[:, 0], idx[:, 1]] = self.reward_color
         idx = torch.nonzero(self.map[0])
         img[:, idx[:, 0], idx[:, 1]] = self.obs_color
@@ -115,64 +115,6 @@ class ObstacleMap(FeatureMap):
             self.num_agents, -1, -1, -1)  # (H, W) to (N, 1, H, W)
         rewards = normalized[1:].unsqueeze(1)   # (N, H, W) to (N, 1, H, W)
         return torch.cat((obstacles, rewards), dim=1)      # (N, 2, H, W)
-
-    def _add_line_segment(self, buffer, p1, p2, reward):
-        """
-        Add line p1-p2 to the obstacle map
-
-        Use a scan-line algorithm to visit a line of pixels
-        """
-        # make sure p2 is on the right side
-        if p1[1] > p2[1]:
-            self._add_line_segment(buffer, p2, p1, reward)
-            return
-
-        k = (p2[0] - p1[0]) / (p2[1] - p1[1] + EPS)
-        if abs(k) > 1:
-            unit = 1 if k > 0 else -1
-            delta = np.array([unit, unit / k])
-            total_step = (int(p2[0]) - int(p1[0])) * unit + 1
-        else:
-            delta = np.array([k, 1])
-            total_step = int(p2[1]) - int(p1[1]) + 1
-
-        p = p1.astype(float)
-        pxls = np.zeros((total_step, 2), dtype=int)
-        for i in range(total_step):
-            pxls[i] = to_pixel(p)
-            p += delta
-        buffer[pxls[:, 0], pxls[:, 1]] = reward
-
-    def _fill_area(self, buffer, reward):
-        """
-        Fill area between drawn lines using scan-line method
-        """
-        for row in range(self.size[0]):
-            filling = False
-            last_empty = True
-            for col in range(self.size[1]):
-                this_empty = buffer[row, col] == 0
-                if filling:
-                    if this_empty:
-                        buffer[row, col] = reward
-                    else:
-                        filling = False
-                elif buffer[row, col] != 0 and last_empty and col < self.size[1] - 1 and buffer[row, col + 1] == 0:
-                    filling = True
-                last_empty = this_empty
-
-    def _get_target(self, reward, agents):
-        """
-        Decide which map will the reward be filled to
-
-        No effect on negative rewards. They will all go to map[0]
-        """
-        if reward <= 0:
-            return [0]
-        elif agents is None:
-            return [i + 1 for i in range(self.num_agents)]
-        else:
-            return [i + 1 for i in agents]
 
     def add_polygon(self, obs: PolygonObstacle, agents=None):
         """
@@ -255,3 +197,61 @@ class ObstacleMap(FeatureMap):
                         idx[mask, 1]] = abs(obs.reward)
         else:
             raise NotImplementedError
+
+    def _add_line_segment(self, buffer, p1, p2, reward):
+        """
+        Add line p1-p2 to the obstacle map
+
+        Use a scan-line algorithm to visit a line of pixels
+        """
+        # make sure p2 is on the right side
+        if p1[1] > p2[1]:
+            self._add_line_segment(buffer, p2, p1, reward)
+            return
+
+        k = (p2[0] - p1[0]) / (p2[1] - p1[1] + EPS)
+        if abs(k) > 1:
+            unit = 1 if k > 0 else -1
+            delta = np.array([unit, unit / k])
+            total_step = (int(p2[0]) - int(p1[0])) * unit + 1
+        else:
+            delta = np.array([k, 1])
+            total_step = int(p2[1]) - int(p1[1]) + 1
+
+        p = p1.astype(float)
+        pxls = np.zeros((total_step, 2), dtype=int)
+        for i in range(total_step):
+            pxls[i] = to_pixel(p)
+            p += delta
+        buffer[pxls[:, 0], pxls[:, 1]] = reward
+
+    def _fill_area(self, buffer, reward):
+        """
+        Fill area between drawn lines using scan-line method
+        """
+        for row in range(self.size[0]):
+            filling = False
+            last_empty = True
+            for col in range(self.size[1]):
+                this_empty = buffer[row, col] == 0
+                if filling:
+                    if this_empty:
+                        buffer[row, col] = reward
+                    else:
+                        filling = False
+                elif buffer[row, col] != 0 and last_empty and col < self.size[1] - 1 and buffer[row, col + 1] == 0:
+                    filling = True
+                last_empty = this_empty
+
+    def _get_target(self, reward, agents):
+        """
+        Decide which map will the reward be filled to
+
+        No effect on negative rewards. They will all go to map[0]
+        """
+        if reward <= 0:
+            return [0]
+        elif agents is None:
+            return [i + 1 for i in range(self.num_agents)]
+        else:
+            return [i + 1 for i in agents]
